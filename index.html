@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Trail Dodge</title>
+<style>
+  :root{ --bg:#060608; --muted:#999; }
+  html,body{height:100%;margin:0;display:flex;align-items:center;justify-content:center;background:var(--bg);color:#fff;font-family:system-ui, -apple-system, "Segoe UI", Roboto;}
+  .wrap{width:min(900px,95vw);aspect-ratio:16/9;position:relative;}
+  canvas{width:100%;height:100%;display:block;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.6)}
+  .ui{position:absolute;left:12px;top:12px;z-index:5;font-size:14px;color:var(--muted)}
+  .center{position:absolute;inset:0;display:grid;place-items:center;z-index:6;pointer-events:none}
+  .overlay{pointer-events:auto;background:rgba(0,0,0,0.45);padding:14px 18px;border-radius:10px;text-align:center}
+  button{margin-top:10px;padding:8px 12px;border-radius:8px;border:0;cursor:pointer}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <canvas id="c"></canvas>
+    <div class="ui" id="hud">Score: 0</div>
+
+    <div class="center" id="centerOverlay" style="display:none">
+      <div class="overlay" id="overlayBox">
+        <div id="overlayTitle">Game Over</div>
+        <div id="overlayScore">Score: 0</div>
+        <button id="restart">Restart</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+/*
+  Trail Dodge — 敵がランダムな方向から来る
+  シンプルに：マウス/タッチで移動、敵に当たったら終了
+*/
+
+// --- canvas 設定 ---
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d', { alpha: false });
+let W = 800, H = 450, DPR = 1;
+function resize(){
+  DPR = Math.max(1, window.devicePixelRatio || 1);
+  W = canvas.clientWidth; H = canvas.clientHeight;
+  canvas.width = Math.floor(W * DPR);
+  canvas.height = Math.floor(H * DPR);
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+}
+window.addEventListener('resize', resize);
+
+// --- ゲーム状態 ---
+let running = false;
+let startTime = 0, lastTime = 0;
+let score = 0;
+
+// プレイヤー（光の輪）
+const player = { x: 400, y: 350, r: 14 };
+const trail = []; const TRAIL_MAX = 28;
+
+// 敵配列
+const enemies = [];
+let spawnTimer = 0;
+const BASE_SPAWN = 0.7; // 出現間隔（秒）
+
+// UI
+const hud = document.getElementById('hud');
+const overlay = document.getElementById('centerOverlay');
+const overlayTitle = document.getElementById('overlayTitle');
+const overlayScore = document.getElementById('overlayScore');
+document.getElementById('restart').addEventListener('click', startGame);
+
+// 入力：ポインタ位置
+const pointer = { x: player.x, y: player.y, down:false };
+function setPointerFromEvent(clientX, clientY){
+  const r = canvas.getBoundingClientRect();
+  pointer.x = clientX - r.left;
+  pointer.y = clientY - r.top;
+}
+canvas.addEventListener('mousemove', e => setPointerFromEvent(e.clientX, e.clientY));
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  const t = e.touches[0];
+  setPointerFromEvent(t.clientX, t.clientY);
+}, {passive:false});
+canvas.addEventListener('mouseenter', ()=> pointer.down = true);
+canvas.addEventListener('mouseleave', ()=> pointer.down = false);
+canvas.addEventListener('touchstart', ()=> pointer.down = true, {passive:true});
+canvas.addEventListener('touchend', ()=> pointer.down = false);
+
+// --- 敵の生成 ---
+// 敵は画面の外（ランダムなエッジ）から出現して、ランダム角度に進む。
+// 見た目は type: 'circle' | 'square' | 'triangle' の3種、色・大きさランダム。
+function spawnEnemy(){
+  const size = 8 + Math.random()*30;
+  // どの辺から出すか（0=top,1=right,2=bottom,3=left）
+  const side = Math.floor(Math.random()*4);
+  let x, y;
+  if(side === 0){ // top
+    x = Math.random() * W;
+    y = -size - 6;
+  } else if(side === 1){ // right
+    x = W + size + 6;
+    y = Math.random() * H;
+  } else if(side === 2){ // bottom
+    x = Math.random() * W;
+    y = H + size + 6;
+  } else { // left
+    x = -size - 6;
+    y = Math.random() * H;
+  }
+  // 進行方向は中心に向けるベースにして、少しランダムを加える
+  const angToCenter = Math.atan2(H/2 - y, W/2 - x);
+  const ang = angToCenter + (Math.random()-0.5) * Math.PI * 0.9; // ±~81deg
+  const speed = 40 + Math.random()*220 + Math.min(0, score*4); // px/sec
+  const vx = Math.cos(ang) * speed;
+  const vy = Math.sin(ang) * speed;
+
+  // 見た目のバリエーション
+  const types = ['circle','square','triangle'];
+  const type = types[Math.floor(Math.random()*types.length)];
+  const colors = ['#f25f5c','#ffd166','#06d6a0','#118ab2','#8e44ad','#f97316'];
+  const color = colors[Math.floor(Math.random()*colors.length)];
+
+  enemies.push({ x, y, vx, vy, r: size, type, color });
+}
+
+// --- 衝突判定（単純化：円同士） ---
+function collided(a, b){
+  const dx = a.x - b.x, dy = a.y - b.y;
+  return dx*dx + dy*dy < (a.r + b.r) * (a.r + b.r);
+}
+
+// --- 描画ヘルパー（形を描く） ---
+function drawEnemyShape(e){
+  ctx.save();
+  ctx.translate(e.x, e.y);
+  ctx.beginPath();
+  if(e.type === 'circle'){
+    ctx.arc(0,0,e.r,0,Math.PI*2);
+    ctx.fill();
+  } else if(e.type === 'square'){
+    ctx.rect(-e.r, -e.r, e.r*2, e.r*2);
+    ctx.fill();
+  } else if(e.type === 'triangle'){
+    const h = e.r * 1.6;
+    ctx.moveTo(0, -h/2);
+    ctx.lineTo(e.r, h/2);
+    ctx.lineTo(-e.r, h/2);
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+// --- メインループ ---
+function loop(ts){
+  if(!running) return;
+  const dt = Math.min(0.05, (ts - lastTime)/1000);
+  lastTime = ts;
+
+  // スコア（生存秒）
+  score = (ts - startTime)/1000;
+  hud.textContent = `Score: ${Math.floor(score)}`;
+
+  // プレイヤーをポインタにイーズで追従
+  const dx = pointer.x - player.x, dy = pointer.y - player.y;
+  player.x += dx * Math.min(1, 12 * dt);
+  player.y += dy * Math.min(1, 12 * dt);
+
+  // トレイルを追加（新しい要素ほど明るい）
+  trail.unshift({ x: player.x, y: player.y });
+  if(trail.length > TRAIL_MAX) trail.pop();
+
+  // 敵出現管理（時間経過で少し難しく）
+  spawnTimer += dt;
+  const difficulty = Math.max(0.35, 1 - Math.min(0.85, score/45));
+  if(spawnTimer > BASE_SPAWN * difficulty){
+    spawnTimer = 0;
+    spawnEnemy();
+  }
+
+  // 敵更新
+  for(let i = enemies.length-1; i >= 0; i--){
+    const e = enemies[i];
+    e.x += e.vx * dt;
+    e.y += e.vy * dt;
+    // 画面外かつ遠ければ削除
+    if(e.x < -200 || e.x > W + 200 || e.y < -200 || e.y > H + 200){
+      enemies.splice(i,1);
+    }
+  }
+
+  // 衝突判定（プレイヤーは円：player.r）
+  for(const e of enemies){
+    if(collided(player, e)){
+      gameOver();
+      return;
+    }
+  }
+
+  // 描画
+  draw();
+  requestAnimationFrame(loop);
+}
+
+// --- 描画 ---
+function draw(){
+  // 背景
+  ctx.fillStyle = '#060608';
+  ctx.fillRect(0,0,W,H);
+
+  // トレイル（古いほど薄く）
+  for(let i=0;i<trail.length;i++){
+    const p = trail[i];
+    const t = 1 - i / trail.length;
+    const rad = player.r * (0.6 + 1.4 * t);
+    ctx.beginPath();
+    ctx.fillStyle = `rgba(255,216,107,${0.12 + 0.45*t})`;
+    ctx.arc(p.x, p.y, rad, 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  // プレイヤーの光
+  ctx.beginPath();
+  const g = ctx.createRadialGradient(player.x, player.y, player.r*0.2, player.x, player.y, player.r*3.5);
+  g.addColorStop(0, 'rgba(255,216,107,0.95)');
+  g.addColorStop(0.5, 'rgba(255,216,107,0.15)');
+  g.addColorStop(1, 'rgba(255,216,107,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(player.x - player.r*4, player.y - player.r*4, player.r*8, player.r*8);
+
+  // プレイヤー本体
+  ctx.beginPath();
+  ctx.fillStyle = '#fff';
+  ctx.arc(player.x, player.y, player.r*0.55, 0, Math.PI*2);
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = 'rgba(255,216,107,0.95)';
+  ctx.beginPath();
+  ctx.arc(player.x, player.y, player.r, 0, Math.PI*2);
+  ctx.stroke();
+
+  // 敵を描く（色反映）
+  for(const e of enemies){
+    ctx.fillStyle = e.color;
+    ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+    ctx.lineWidth = 2;
+    drawEnemyShape(e);
+    // 縁取り
+    ctx.beginPath();
+    ctx.stroke();
+  }
+}
+
+// --- ゲーム開始 / 終了 ---
+function startGame(){
+  enemies.length = 0;
+  trail.length = 0;
+  spawnTimer = 0;
+  startTime = performance.now();
+  lastTime = startTime;
+  score = 0;
+  running = true;
+  overlay.style.display = 'none';
+  // プレイヤー初期位置
+  player.x = W/2; player.y = H*0.8;
+  pointer.x = player.x; pointer.y = player.y;
+  requestAnimationFrame(loop);
+}
+
+function gameOver(){
+  running = false;
+  overlay.style.display = 'grid';
+  overlayTitle.textContent = 'Game Over';
+  overlayScore.textContent = `Score: ${Math.floor(score)}`;
+}
+
+// --- 初期表示 ---
+resize();
+(function showStartOverlay(){
+  overlay.style.display = 'grid';
+  overlayTitle.textContent = 'Trail Dodge';
+  document.getElementById('restart').textContent = 'Start';
+})();
+</script>
+</body>
+</html>
