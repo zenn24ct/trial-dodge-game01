@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Jumping Cube Deluxe</title>
+<style>
+  :root{ --bg:#0f0f18; --muted:#999; }
+  html,body{height:100%;margin:0;display:flex;align-items:center;justify-content:center;background:var(--bg);color:#fff;font-family:system-ui, -apple-system, "Segoe UI", Roboto;}
+  .wrap{width:min(900px,95vw);aspect-ratio:16/9;position:relative;}
+  canvas{width:100%;height:100%;display:block;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.6)}
+  .ui{position:absolute;left:12px;top:12px;z-index:5;font-size:14px;color:var(--muted);display:flex;gap:20px;}
+  .center{position:absolute;inset:0;display:grid;place-items:center;z-index:6;pointer-events:none}
+  .overlay{pointer-events:auto;background:rgba(0,0,0,0.45);padding:14px 18px;border-radius:10px;text-align:center}
+  button{margin-top:10px;padding:8px 12px;border-radius:8px;border:0;cursor:pointer;background:#4CAF50;color:white}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <canvas id="c"></canvas>
+    <div class="ui" id="hud">
+      <span id="scoreDistance">Distance: 0m</span>
+      <span id="scoreCoins">Coins: 0</span>
+    </div>
+
+    <div class="center" id="centerOverlay" style="display:none">
+      <div class="overlay" id="overlayBox">
+        <div id="overlayTitle">Jumping Cube Deluxe</div>
+        <div id="overlayScore">Distance: 0m | Coins: 0</div>
+        <button id="restart">Start</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+// --- 1. ゲーム設定と初期化 (Setup & Init) ---
+
+// Canvas 設定
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d', { alpha: false });
+let W = 800, H = 450, DPR = 1;
+function resize(){
+  DPR = Math.max(1, window.devicePixelRatio || 1);
+  W = canvas.clientWidth; H = canvas.clientHeight;
+  canvas.width = Math.floor(W * DPR);
+  canvas.height = Math.floor(H * DPR);
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+}
+window.addEventListener('resize', resize);
+
+// ゲーム定数
+const CUBE_SIZE = 30;
+const GROUND_Y = 380;
+const GRAVITY = 1500; // 重力 (px/s^2)
+const JUMP_POWER = 550; // ジャンプ初速 (px/s)
+const SCROLL_SPEED = 200; // 地形のスクロール速度 (px/s)
+
+// ゲーム状態
+let running = false;
+let lastTime = 0;
+let distance = 0;
+let coinsCollected = 0; // コインスコア
+let groundBlocks = [];
+let collectibles = []; // 収集アイテム配列 (コイン)
+let spawnTimer = 0;
+const BASE_SPAWN = 1.0;
+
+// プレイヤー
+const player = {
+  x: W / 4,
+  y: GROUND_Y - CUBE_SIZE,
+  vy: 0, // Y軸速度
+  size: CUBE_SIZE,
+  onGround: true,
+  jumpsLeft: 1, // 1に設定 (2段ジャンプを許可するため、最大2に設定)
+  MAX_JUMPS: 2, // ダブルジャンプを許可
+};
+
+// UI / 入力設定
+const hudDistance = document.getElementById('scoreDistance');
+const hudCoins = document.getElementById('scoreCoins');
+const overlay = document.getElementById('centerOverlay');
+const overlayTitle = document.getElementById('overlayTitle');
+const overlayScore = document.getElementById('overlayScore');
+document.getElementById('restart').addEventListener('click', startGame);
+
+// 入力：ジャンプ/ダブルジャンプ
+function jump(){
+  if(!running) return;
+
+  if(player.onGround || player.jumpsLeft > 0){
+    player.vy = -JUMP_POWER; // 上向きに速度設定
+    player.onGround = false;
+    player.jumpsLeft--;
+    if(player.jumpsLeft === 1) {
+        // ダブルジャンプ時の視覚効果（プレイヤーを少し明るくするなど）
+    }
+  }
+}
+// スペース/上矢印/タップでジャンプ
+document.addEventListener('keydown', e => {
+  if(e.code === 'Space' || e.code === 'ArrowUp') jump();
+});
+canvas.addEventListener('click', jump);
+canvas.addEventListener('touchstart', jump, {passive:true});
+
+
+// --- 2. ゲームロジックと更新 (Game Logic & Update) ---
+
+// 地形とアイテムの生成
+function spawnObstacleOrCollectible(){
+  let blockType = 0; // 0=穴, 1=地面/プラットフォーム, 2=スパイク
+  let w = 80 + Math.random() * 200; // 幅
+  let h = 0;
+  let color = '#795548';
+
+  const r = Math.random();
+  if(r < 0.3){ // 30% 地面の隙間（穴）
+    w = 40 + Math.random() * 80;
+    blockType = 0;
+  } else if(r < 0.65){ // 35% スパイク
+    blockType = 2; w = 30 + Math.random() * 50; h = 20;
+    color = '#f25f5c'; // 赤
+  } else { // 35% 地形とコイン
+    blockType = 1; w = 150 + Math.random() * 100; h = 0;
+    
+    // コインを生成
+    if(Math.random() < 0.7){ // 70%の確率でコインを配置
+        // Y座標は地面より少し高い位置 (GROUND_Y - 50〜100)
+        const coinY = GROUND_Y - (50 + Math.random() * 50);
+        // ブロックの真ん中あたりに配置
+        const coinX = W + w / 2 - 10; 
+        collectibles.push({ x: coinX, y: coinY, r: 10, collected: false });
+    }
+  }
+  
+  // ブロックを追加
+  if(blockType !== 0) {
+      groundBlocks.push({
+          x: W, y: GROUND_Y - h, w: w, h: h > 0 ? h : (H - GROUND_Y), 
+          type: blockType, color: color, isDeadly: blockType === 2
+      });
+  }
+}
+
+// 衝突判定（単純化：円と円、または円と矩形を近似）
+function checkCollision(objA, objB){
+  // A: プレイヤー (矩形), B: ブロック/アイテム (矩形または円)
+  const p = player;
+  // Bounding Box (AABB) 衝突
+  const collisionBox = p.x < objB.x + (objB.w || objB.r*2) &&
+                       p.x + p.size > objB.x &&
+                       p.y < objB.y + (objB.h || objB.r*2) &&
+                       p.y + p.size > objB.y;
+
+  if(objB.r && collisionBox){ // Bが円（コイン）の場合
+    const centerA = { x: p.x + p.size/2, y: p.y + p.size/2 };
+    const centerB = { x: objB.x, y: objB.y };
+    const dx = centerA.x - centerB.x;
+    const dy = centerA.y - centerB.y;
+    const distanceSq = dx*dx + dy*dy;
+    // 衝突半径を少し小さくして、視覚的な違和感を減らす
+    const rSum = (p.size/2) + objB.r * 0.7; 
+    return distanceSq < rSum * rSum;
+  }
+  
+  return collisionBox; // Bが矩形（ブロック）の場合
+}
+
+// メインループ
+function loop(ts){
+  if(!running) return;
+  const dt = Math.min(0.05, (ts - lastTime)/1000);
+  lastTime = ts;
+
+  // --- スコア更新 ---
+  distance += SCROLL_SPEED * dt / 100;
+  hudDistance.textContent = `Distance: ${Math.floor(distance)}m`;
+  hudCoins.textContent = `Coins: ${coinsCollected}`;
+
+  // --- 1. プレイヤー更新（物理演算） ---
+  player.vy += GRAVITY * dt;
+  player.y += player.vy * dt;
+
+  // リセット
+  let wasOnGround = player.onGround;
+  player.onGround = false;
+
+  // --- 2. 地形/障害物の更新と衝突判定 ---
+  for(let i = groundBlocks.length - 1; i >= 0; i--){
+    const block = groundBlocks[i];
+    block.x -= SCROLL_SPEED * dt;
+
+    if(block.x + block.w < 0){
+      groundBlocks.splice(i, 1);
+      continue;
+    }
+
+    if(checkCollision(player, block)){
+      if(block.isDeadly){
+        gameOver();
+        return;
+      }
+      
+      // 着地判定 (プレイヤーの底がブロックのy座標に達しているか)
+      if(player.vy > 0 && player.y + player.size <= block.y + player.vy * dt + 5){ 
+        player.y = block.y - player.size; // ブロックの上に着地
+        player.vy = 0;
+        player.onGround = true;
+      }
+    }
+  }
+
+  // デフォルトの地面に着地
+  if(player.y + player.size >= GROUND_Y){
+    player.y = GROUND_Y - player.size;
+    player.vy = 0;
+    player.onGround = true;
+  }
+  
+  // 着地した瞬間、ジャンプ回数をリセット
+  if(player.onGround && !wasOnGround){
+    player.jumpsLeft = player.MAX_JUMPS;
+  }
+
+  // --- 3. アイテムの更新と収集判定 ---
+  for(let i = collectibles.length - 1; i >= 0; i--){
+    const coin = collectibles[i];
+    coin.x -= SCROLL_SPEED * dt; // スクロール
+
+    if(coin.x + coin.r < 0){
+      collectibles.splice(i, 1); // 画面外
+      continue;
+    }
+
+    if(checkCollision(player, coin)){
+        coinsCollected++;
+        collectibles.splice(i, 1); // 収集
+        // 収集時の音やエフェクトは未実装
+    }
+  }
+
+  // --- 4. 障害物出現管理 ---
+  spawnTimer += dt;
+  const difficultyFactor = 1 / (1 + distance / 600);
+  if(spawnTimer > BASE_SPAWN * difficultyFactor){
+    spawnTimer = 0;
+    // 直前が穴の場合は地面を、それ以外は障害物/アイテムを出す
+    if(groundBlocks.length > 0 && groundBlocks[groundBlocks.length-1].type === 0){
+      groundBlocks.push({ x: W, y: GROUND_Y, w: 200, h: H - GROUND_Y, type: 1, color: '#795548' });
+    } else {
+       if(Math.random() < 0.8) spawnObstacleOrCollectible();
+    }
+  }
+
+  // 描画
+  draw();
+  requestAnimationFrame(loop);
+}
+
+
+// --- 3. 描画とユーティリティ (Drawing & Utils) ---
+
+// 描画
+function draw(){
+  // 1. 背景
+  ctx.fillStyle = '#1e2029';
+  ctx.fillRect(0,0,W,H);
+  
+  // 2. 地面
+  ctx.fillStyle = '#795548';
+  ctx.fillRect(0, GROUND_Y, W, H - GROUND_Y);
+
+  // 3. 地形/障害物
+  for(const block of groundBlocks){
+    ctx.fillStyle = block.color;
+    if(block.type === 2){ // スパイク
+      const segmentCount = Math.floor(block.w / 10) || 1;
+      ctx.beginPath();
+      ctx.moveTo(block.x, block.y); 
+      for(let i=0; i<segmentCount; i++){
+        const baseX = block.x + i * (block.w / segmentCount);
+        const nextX = block.x + (i + 1) * (block.w / segmentCount);
+        const midX = (baseX + nextX) / 2;
+        ctx.lineTo(midX, block.y - 10);
+        ctx.lineTo(nextX, block.y);
+      }
+      ctx.lineTo(block.x + block.w, block.y + block.h);
+      ctx.lineTo(block.x, block.y + block.h);
+      ctx.closePath();
+      ctx.fill();
+    } else if(block.type !== 0) {
+      ctx.fillRect(block.x, block.y, block.w, block.h);
+    }
+  }
+
+  // 4. コイン (収集アイテム)
+  for(const coin of collectibles){
+    ctx.fillStyle = '#FFC107'; // ゴールド
+    ctx.beginPath();
+    ctx.arc(coin.x, coin.y, coin.r, 0, Math.PI*2);
+    ctx.fill();
+    // コインのハイライト
+    ctx.fillStyle = '#FFF9C4';
+    ctx.font = 'bold 12px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('C', coin.x, coin.y);
+  }
+
+  // 5. プレイヤー (キューブ)
+  // ジャンプ回数によって色を変える
+  let playerColor = player.onGround ? '#4CAF50' : (player.jumpsLeft === 1 ? '#8BC34A' : '#6A9F42'); 
+  ctx.fillStyle = playerColor;
+  ctx.strokeStyle = player.jumpsLeft > 0 ? '#fff' : '#aaa';
+  ctx.lineWidth = 3;
+  ctx.fillRect(player.x, player.y, player.size, player.size);
+  ctx.strokeRect(player.x, player.y, player.size, player.size);
+  
+  // ジャンプ回数インジケータ
+  if(player.jumpsLeft > 0){
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.arc(player.x + player.size - 5, player.y + 5, 3, 0, Math.PI * 2);
+      ctx.fill();
+  }
+}
+
+// ゲーム開始
+function startGame(){
+  groundBlocks.length = 0;
+  collectibles.length = 0;
+  distance = 0;
+  coinsCollected = 0;
+  spawnTimer = 0;
+  lastTime = performance.now();
+  running = true;
+  overlay.style.display = 'none';
+
+  // プレイヤー初期位置
+  player.x = W / 4;
+  player.y = GROUND_Y - CUBE_SIZE;
+  player.vy = 0;
+  player.onGround = true;
+  player.jumpsLeft = player.MAX_JUMPS;
+
+  // 初期地面を配置
+  groundBlocks.push({ x: 0, y: GROUND_Y, w: W, h: H - GROUND_Y, type: 1, color: '#795548' }); 
+
+  requestAnimationFrame(loop);
+}
+
+// ゲーム終了
+function gameOver(){
+  running = false;
+  overlay.style.display = 'grid';
+  overlayTitle.textContent = 'Game Over';
+  overlayScore.textContent = `Distance: ${Math.floor(distance)}m | Coins: ${coinsCollected}`;
+}
+
+// 初期表示
+resize();
+(function showStartOverlay(){
+  overlay.style.display = 'grid';
+  overlayTitle.textContent = 'Jumping Cube Deluxe';
+  document.getElementById('restart').textContent = 'Start';
+})();
+</script>
+</body>
+</html>
